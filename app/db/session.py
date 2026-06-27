@@ -8,9 +8,7 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
-    connect_args={
-        "ssl": "require"
-    }
+    connect_args={"ssl": "require"} if settings.DB_SSL else {},
 )
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)

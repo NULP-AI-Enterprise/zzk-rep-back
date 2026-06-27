@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zzk-postgres-data
+  namespace: zzk-register
+  labels:
+    app: zzk-postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path   # default k3s provisioner
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zzk-redis-data
+  namespace: zzk-register
+  labels:
+    app: zzk-redis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

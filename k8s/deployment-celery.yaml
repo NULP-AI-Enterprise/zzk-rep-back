@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zzk-celery
+  namespace: zzk-register
+  labels:
+    app: zzk-celery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zzk-celery
+  template:
+    metadata:
+      labels:
+        app: zzk-celery
+    spec:
+      containers:
+        - name: celery
+          # CI workflow pins this tag on every push to main
+          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:latest
+          command:
+            - celery
+            - -A
+            - app.tasks.celery_tasks.celery_app
+            - worker
+            - --loglevel=info
+          envFrom:
+            - secretRef:
+                name: zzk-register-secret
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          terminationMessagePolicy: FallbackToLogsOnError
+
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+
+      restartPolicy: Always

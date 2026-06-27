@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zzk-celery-beat
+  namespace: zzk-register
+  labels:
+    app: zzk-celery-beat
+spec:
+  replicas: 1    # must always be 1 — multiple beat instances cause duplicate tasks
+  selector:
+    matchLabels:
+      app: zzk-celery-beat
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: zzk-celery-beat
+    spec:
+      containers:
+        - name: celery-beat
+          # CI workflow pins this tag on every push to main
+          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:latest
+          command:
+            - celery
+            - -A
+            - app.tasks.celery_tasks.celery_app
+            - beat
+            - --loglevel=info
+          envFrom:
+            - secretRef:
+                name: zzk-register-secret
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          terminationMessagePolicy: FallbackToLogsOnError
+
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+
+      restartPolicy: Always

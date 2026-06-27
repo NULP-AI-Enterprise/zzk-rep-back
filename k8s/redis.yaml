@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zzk-redis
+  namespace: zzk-register
+  labels:
+    app: zzk-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zzk-redis
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: zzk-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          args: ["redis-server", "--appendonly", "yes"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: zzk-redis-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: zzk-register
+spec:
+  type: ClusterIP
+  selector:
+    app: zzk-redis
+  ports:
+    - port: 6379
+      targetPort: 6379

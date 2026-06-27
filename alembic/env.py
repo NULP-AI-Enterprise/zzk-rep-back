@@ -34,8 +34,8 @@ def do_run_migrations(connection):
 async def run_migrations_online():
     # Створюємо асинхронний двигун
     connectable = create_async_engine(
-        settings.DATABASE_URL.split("?")[0],  # Без параметрів
-        connect_args={"ssl": "require"},
+        settings.DATABASE_URL.split("?")[0],
+        connect_args={"ssl": "require"} if settings.DB_SSL else {},
         poolclass=pool.NullPool,
     )
 
