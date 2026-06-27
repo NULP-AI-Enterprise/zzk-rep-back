@@ -19,10 +19,10 @@ annotated-types==0.7.0
 
 # Auth & Security
 python-jose==3.3.0
-cryptography==42.0.7
+cryptography
 passlib==1.7.4
 bcrypt==5.0.0
-pyOpenSSL==26.3.0
+pyOpenSSL
 rsa==4.9.1
 
 # Celery & Redis
