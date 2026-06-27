@@ -16,4 +16,4 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # Команда запуску (міграції + сервер)
-CMD alembic upgrade head && gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
+CMD alembic upgrade head && gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
