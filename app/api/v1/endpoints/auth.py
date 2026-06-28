@@ -67,7 +67,7 @@ async def send_magic_link(
         token_value = secrets.token_urlsafe(48)
         auth_token = AuthToken(
             token=token_value,
-            expires_at=datetime.now() + timedelta(minutes=15),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
             user_id=user.id if user else None,
             patient_id=patient.id if patient else None
         )
@@ -94,7 +94,7 @@ async def verify_magic_link(
     if not auth_token or auth_token.used_at is not None or auth_token.expires_at < now:
         raise HTTPException(status_code=400, detail="Невалідний або протермінований токен")
 
-    auth_token.used_at = datetime.now()
+    auth_token.used_at = datetime.now(timezone.utc)
     await db.commit()
 
     if auth_token.user_id:
