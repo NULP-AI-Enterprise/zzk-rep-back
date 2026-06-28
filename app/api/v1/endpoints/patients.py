@@ -41,29 +41,28 @@ def _serialize_patient(patient: PatientProfile, current_user: User) -> dict:
     return surname
 
 
-# ── Список пацієнтів ─────────────────────────────────────────────────────────
-
 @router.get("", response_model=list[PatientListItem])
 async def list_patients(
     status_filter: Optional[PatientStatus] = Query(None, alias="status"),
     diagnosis: Optional[str] = Query(None),
-    current_user: User = Depends(require_doctor_or_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Список пацієнтів.
-    - DOCTOR   бачить тільки своїх пацієнтів.
-    - ADMIN    бачить всіх.
-    Фільтри: status (PENDING / ATTACHED / DETACHED), diagnosis (UC/CD/UNCLASSIFIED).
-    """
+    if current_user.role not in (UserRole.DOCTOR, UserRole.MODERATOR, UserRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+
     q = select(PatientProfile).options(*_load_options())
 
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
 
+    elif current_user.role == UserRole.MODERATOR:
+        q = q.join(User, PatientProfile.doctor_id == User.id).where(
+            User.region_id == current_user.region_id
+        )
+
     if status_filter:
         q = q.where(PatientProfile.status == status_filter)
-
     if diagnosis:
         q = q.where(PatientProfile.diagnosis == diagnosis)
 
@@ -71,58 +70,69 @@ async def list_patients(
     return result.scalars().all()
 
 
-# ── Pending (непідтверджені) ──────────────────────────────────────────────────
-
 @router.get("/pending", response_model=list[PatientListItem])
 async def list_pending(
-    current_user: User = Depends(require_doctor_or_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.role not in (UserRole.DOCTOR, UserRole.MODERATOR, UserRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+
     q = select(PatientProfile).options(*_load_options()).where(
         PatientProfile.status == PatientStatus.PENDING
     )
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
+    elif current_user.role == UserRole.MODERATOR:
+        q = q.join(User, PatientProfile.doctor_id == User.id).where(
+            User.region_id == current_user.region_id
+        )
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
 
 
-# ── Attached (підтверджені) ───────────────────────────────────────────────────
-
 @router.get("/attached", response_model=list[PatientListItem])
 async def list_attached(
-    current_user: User = Depends(require_doctor_or_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.role not in (UserRole.DOCTOR, UserRole.MODERATOR, UserRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+
     q = select(PatientProfile).options(*_load_options()).where(
         PatientProfile.status == PatientStatus.ATTACHED
     )
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
+    elif current_user.role == UserRole.MODERATOR:
+        q = q.join(User, PatientProfile.doctor_id == User.id).where(
+            User.region_id == current_user.region_id
+        )
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
 
 
-# ── Detached (відкріплені) ────────────────────────────────────────────────────
-
 @router.get("/detached", response_model=list[PatientListItem])
 async def list_detached(
-    current_user: User = Depends(require_doctor_or_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.role not in (UserRole.DOCTOR, UserRole.MODERATOR, UserRole.ADMIN):
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+
     q = select(PatientProfile).options(*_load_options()).where(
         PatientProfile.status == PatientStatus.DETACHED
     )
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
+    elif current_user.role == UserRole.MODERATOR:
+        q = q.where(PatientProfile.region_id == current_user.region_id)
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
 
-
-# ── Деталі одного пацієнта ────────────────────────────────────────────────────
 
 @router.get("/{patient_id}", response_model=PatientOut)
 async def get_patient(
@@ -137,11 +147,9 @@ async def get_patient(
     if not patient:
         raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
 
-    # PATIENT бачить лише свій профіль
     if current_user.role == UserRole.PATIENT and patient.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
-    # DOCTOR бачить лише своїх пацієнтів
     if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
@@ -149,8 +157,6 @@ async def get_patient(
     out.surname = _serialize_patient(patient, current_user)
     return out
 
-
-# ── Створення пацієнта ────────────────────────────────────────────────────────
 
 @router.post("", response_model=PatientOut, status_code=status.HTTP_201_CREATED)
 async def create_patient(
@@ -190,8 +196,6 @@ async def create_patient(
     return out
 
 
-# ── Оновлення профілю ─────────────────────────────────────────────────────────
-
 @router.patch("/{patient_id}", response_model=PatientOut)
 async def update_patient(
     patient_id: int,
@@ -225,14 +229,14 @@ async def update_patient(
     return out
 
 
-# ── Зміна статусу (прикріпити / відкріпити) ──────────────────────────────────
+# ── Зміна статусу ────────────────────────────────────────────────────────────
 
 @router.patch("/{patient_id}/status", response_model=PatientOut)
 async def update_status(
-        patient_id: int,
-        body: PatientStatusUpdate,
-        current_user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    patient_id: int,
+    body: PatientStatusUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Правила зміни статусу:
@@ -257,7 +261,6 @@ async def update_status(
     is_moderator_or_admin = current_user.role in (UserRole.MODERATOR, UserRole.ADMIN)
     is_doctor = current_user.role == UserRole.DOCTOR
 
-    # DOCTOR — лише відкріплення свого пацієнта
     if is_doctor:
         if patient.doctor_id != current_user.id:
             raise HTTPException(status_code=403, detail="Доступ заборонено")
@@ -270,7 +273,6 @@ async def update_status(
     elif not is_moderator_or_admin:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
-    # Валідація: ATTACHED/PENDING потребують doctor_id
     if body.status in (PatientStatus.ATTACHED, PatientStatus.PENDING):
         if not is_doctor and not body.doctor_id:
             raise HTTPException(
@@ -278,14 +280,11 @@ async def update_status(
                 detail="doctor_id обов'язковий при статусі ATTACHED або PENDING",
             )
 
-    # Застосовуємо зміни
     patient.status = body.status
 
     if body.status == PatientStatus.DETACHED:
-        # Відкріплення — очищаємо doctor_id
         patient.doctor_id = None
     elif is_moderator_or_admin and body.doctor_id:
-        # Модератор/Адмін призначає лікаря
         patient.doctor_id = body.doctor_id
     elif is_doctor and body.status == PatientStatus.DETACHED:
         patient.doctor_id = None
@@ -296,7 +295,7 @@ async def update_status(
     out = PatientOut.model_validate(patient)
     out.surname = _serialize_patient(patient, current_user)
     return out
-# ── Видалення ─────────────────────────────────────────────────────────────────
+
 
 @router.delete("/{patient_id}", response_model=MessageResponse)
 async def delete_patient(
