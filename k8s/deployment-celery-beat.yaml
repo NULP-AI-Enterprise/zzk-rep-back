@@ -24,7 +24,7 @@ spec:
           command:
             - celery
             - -A
-            - app.tasks.celery_tasks.celery_app
+            - app.tasks.celery_tasks
             - beat
             - --loglevel=info
           envFrom:

@@ -1,5 +1,6 @@
 # Kubernetes plain secrets — never commit, use sealed-secret.yaml instead
 k8s/secret.yaml
+k8s/cloudflared.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
