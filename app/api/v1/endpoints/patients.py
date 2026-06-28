@@ -57,9 +57,7 @@ async def list_patients(
         q = q.where(PatientProfile.doctor_id == current_user.id)
 
     elif current_user.role == UserRole.MODERATOR:
-        q = q.join(User, PatientProfile.doctor_id == User.id).where(
-            User.region_id == current_user.region_id
-        )
+        q = q.where(PatientProfile.region_id == current_user.region_id)
 
     if status_filter:
         q = q.where(PatientProfile.status == status_filter)
@@ -81,12 +79,12 @@ async def list_pending(
     q = select(PatientProfile).options(*_load_options()).where(
         PatientProfile.status == PatientStatus.PENDING
     )
+
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
+
     elif current_user.role == UserRole.MODERATOR:
-        q = q.join(User, PatientProfile.doctor_id == User.id).where(
-            User.region_id == current_user.region_id
-        )
+        q = q.where(PatientProfile.region_id == current_user.region_id)
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
@@ -105,10 +103,9 @@ async def list_attached(
     )
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
+
     elif current_user.role == UserRole.MODERATOR:
-        q = q.join(User, PatientProfile.doctor_id == User.id).where(
-            User.region_id == current_user.region_id
-        )
+        q = q.where(PatientProfile.region_id == current_user.region_id)
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
@@ -127,6 +124,7 @@ async def list_detached(
     )
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
+
     elif current_user.role == UserRole.MODERATOR:
         q = q.where(PatientProfile.region_id == current_user.region_id)
 
@@ -150,7 +148,8 @@ async def get_patient(
     if current_user.role == UserRole.PATIENT and patient.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
-    if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
+    if current_user.role in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.MODERATOR) \
+            and patient.doctor_id != current_user.id:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
     out = PatientOut.model_validate(patient)
@@ -200,7 +199,7 @@ async def create_patient(
 async def update_patient(
     patient_id: int,
     body: PatientUpdate,
-    current_user: User = Depends(require_doctor_or_admin),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -210,7 +209,10 @@ async def update_patient(
     if not patient:
         raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
 
-    if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
+    if current_user.role not in (UserRole.DOCTOR, UserRole.ADMIN, UserRole.MODERATOR):
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+
+    if patient.doctor_id != current_user.id:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
     data = body.model_dump(exclude_none=True)
@@ -228,8 +230,6 @@ async def update_patient(
     out.surname = _serialize_patient(patient, current_user)
     return out
 
-
-# ── Зміна статусу ────────────────────────────────────────────────────────────
 
 @router.patch("/{patient_id}/status", response_model=PatientOut)
 async def update_status(
