@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     SMTP_PORT: int = 587
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "https://zzk.thesis-i.com"
 
     # S3 / Consent files
     S3_BUCKET: str = ""
