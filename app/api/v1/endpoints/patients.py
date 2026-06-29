@@ -147,7 +147,7 @@ async def get_patient(
     if not patient:
         raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
 
-    if current_user.role == UserRole.PATIENT and patient.user_id != current_user.id:
+    if current_user.role == UserRole.PATIENT and patient.id != current_user.id:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
     if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:

@@ -366,3 +366,19 @@ class SelfAssessmentToken(Base):
     used_at = Column(DateTime(timezone=True))
 
     patient = relationship("PatientProfile", back_populates="tokens")
+
+
+# ── Consent File ──────────────────────────────────────────────────────────────
+
+class ConsentFile(Base):
+    __tablename__ = "consent_files"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("patient_profiles.id", ondelete="CASCADE"), nullable=False)
+    uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    s3_key = Column(String(500), nullable=False)
+    original_filename = Column(String(255))
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    patient = relationship("PatientProfile", backref="consent_files")
+    uploader = relationship("User")

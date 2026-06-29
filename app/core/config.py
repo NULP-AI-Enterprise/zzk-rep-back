@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # S3 / Consent files
+    S3_BUCKET: str = ""
+    S3_REGION: str = "eu-central-1"
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+
     model_config = SettingsConfigDict(env_file=".env")
 
 settings = Settings()

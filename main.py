@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.db.session import AsyncSessionLocal # Або ваш спосіб отримання сесії
 from app.db.init_db import init_db
 
-from app.api.v1.endpoints import (auth, patients, records, regions, self_assessment, user)
+from app.api.v1.endpoints import (auth, consent, patients, records, regions, self_assessment, user)
 
 app = FastAPI(
     title="ЗЗК Реєстр API",
@@ -28,6 +28,7 @@ app.include_router(patients.router,          prefix=PREFIX)
 app.include_router(records.router,           prefix=PREFIX)
 app.include_router(self_assessment.router,  prefix=PREFIX)
 app.include_router(regions.router,           prefix=PREFIX)
+app.include_router(consent.router,           prefix=PREFIX)
 
 
 @app.on_event("startup")

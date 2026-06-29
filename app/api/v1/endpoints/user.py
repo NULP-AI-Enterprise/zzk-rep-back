@@ -85,9 +85,6 @@ async def get_user(
     return user
 
 
-from sqlalchemy.orm import selectinload  # Не забудьте імпорт
-
-
 @router.patch("/{user_id}", response_model=UserOut)
 async def update_user(
         user_id: int,

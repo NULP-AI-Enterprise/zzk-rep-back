@@ -27,6 +27,8 @@ async def _get_patient_or_403(patient_id: int, current_user: User, db: AsyncSess
         raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
     if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
+    if isinstance(current_user, PatientProfile) and patient.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
     return patient
 
 
