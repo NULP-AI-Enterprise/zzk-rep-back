@@ -21,7 +21,7 @@ spec:
     spec:
       initContainers:
         - name: migrate
-          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:sha-b364c4b
+          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:sha-390b8c7
           command: ["alembic", "upgrade", "head"]
           envFrom:
             - secretRef:
@@ -30,7 +30,7 @@ spec:
       containers:
         - name: zzk-register
           # CI workflow pins this tag on every push to main
-          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:sha-b364c4b
+          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:sha-390b8c7
           command:
             - gunicorn
             - main:app
