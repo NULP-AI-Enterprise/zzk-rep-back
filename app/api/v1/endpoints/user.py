@@ -3,15 +3,29 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.models import AuthToken, User, UserRole
+from app.models.models import AuthToken, Region, User, UserRole
 from app.schemas.schemas import MessageResponse, UserCreate, UserOut, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["Users"])
+
+
+async def _validate_region(region_id: int, db: AsyncSession) -> None:
+    res = await db.execute(select(Region).where(Region.id == region_id))
+    if not res.scalar_one_or_none():
+        raise HTTPException(status_code=422, detail=f"Регіон з id={region_id} не існує")
+
+
+async def _fetch_user_with_region(user_id: int, db: AsyncSession) -> User:
+    result = await db.execute(
+        select(User).options(selectinload(User.region)).where(User.id == user_id)
+    )
+    return result.scalar_one()
 
 
 def _send_welcome_link(to: str, token: str, frontend_url: str) -> None:
@@ -49,7 +63,10 @@ async def create_user(
 ):
     exists = await db.execute(select(User).where(User.email == body.email))
     if exists.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Email вже використовується")
+        raise HTTPException(status_code=409, detail="Email вже використовується")
+
+    if body.region_id is not None:
+        await _validate_region(body.region_id, db)
 
     user = User(
         email=body.email,
@@ -64,20 +81,20 @@ async def create_user(
     db.add(user)
     await db.flush()  # get user.id before creating token
 
-    # Create a 24-hour welcome token so the new user can log in
     token_value = secrets.token_urlsafe(48)
     db.add(AuthToken(
         token=token_value,
         user_id=user.id,
         expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
     ))
-    await db.commit()
 
-    # Re-fetch with region loaded to avoid MissingGreenlet during serialization
-    result = await db.execute(
-        select(User).options(selectinload(User.region)).where(User.id == user.id)
-    )
-    user = result.scalar_one()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Email вже використовується")
+
+    user = await _fetch_user_with_region(user.id, db)
 
     from app.core.config import settings
     background_tasks.add_task(_send_welcome_link, body.email, token_value, settings.FRONTEND_URL)
@@ -135,39 +152,50 @@ async def get_user(
 
 @router.patch("/{user_id}", response_model=UserOut)
 async def update_user(
-        user_id: int,
-        body: UserUpdate,
-        current_user: User = Depends(get_current_user),
-        db: AsyncSession = Depends(get_db),
+    user_id: int,
+    body: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     if current_user.id != user_id and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
-    result = await db.execute(
-        select(User).where(User.id == user_id)
-    )
+    result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
-    for field, value in body.model_dump(exclude_none=True).items():
+    data = body.model_dump(exclude_none=True)
+
+    if "email" in data and data["email"] != user.email:
+        dup = await db.execute(select(User).where(User.email == data["email"]))
+        if dup.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Email вже використовується")
+
+    if "region_id" in data:
+        await _validate_region(data["region_id"], db)
+
+    for field, value in data.items():
         setattr(user, field, value)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Конфлікт даних при оновленні")
 
-    # Re-fetch to ensure region is loaded after potential region_id change
-    result = await db.execute(
-        select(User).options(selectinload(User.region)).where(User.id == user_id)
-    )
-    return result.scalar_one()
+    return await _fetch_user_with_region(user_id, db)
 
 
 @router.delete("/{user_id}", response_model=MessageResponse)
 async def delete_user(
     user_id: int,
-    _: User = Depends(require_admin),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="Не можна видалити власний акаунт")
+
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:

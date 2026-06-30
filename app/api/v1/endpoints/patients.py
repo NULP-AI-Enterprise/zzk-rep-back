@@ -2,6 +2,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -9,7 +10,7 @@ from app.core.deps import get_current_user, require_doctor_or_admin
 from app.core.security import decrypt_surname, encrypt_surname
 from app.db.session import get_db
 from app.models.models import (
-    PatientProfile, PatientStatus, User, UserRole,
+    PatientProfile, PatientStatus, Region, User, UserRole,
 )
 from app.schemas.schemas import (
     MessageResponse, PatientCreate, PatientListItem,
@@ -26,19 +27,37 @@ def _load_options():
     ]
 
 
-def _serialize_patient(patient: PatientProfile, current_user: User) -> dict:
-    """
-    Прізвище дешифрується ТІЛЬКИ якщо current_user є лікарем цього пацієнта.
-    ADMIN, MODERATOR, інші лікарі — бачать None.
-    """
-    surname = None
+async def _fetch_patient(patient_id: int, db: AsyncSession) -> PatientProfile:
+    result = await db.execute(
+        select(PatientProfile).options(*_load_options()).where(PatientProfile.id == patient_id)
+    )
+    return result.scalar_one()
+
+
+def _serialize_surname(patient: PatientProfile, current_user: User) -> Optional[str]:
     if (
         current_user.role == UserRole.DOCTOR
         and current_user.id == patient.doctor_id
         and patient.surname_encrypted
     ):
-        surname = decrypt_surname(patient.surname_encrypted)
-    return surname
+        return decrypt_surname(patient.surname_encrypted)
+    return None
+
+
+async def _validate_doctor_id(doctor_id: int, db: AsyncSession) -> User:
+    res = await db.execute(select(User).where(User.id == doctor_id))
+    doctor = res.scalar_one_or_none()
+    if not doctor:
+        raise HTTPException(status_code=422, detail=f"Лікаря з id={doctor_id} не знайдено")
+    if doctor.role != UserRole.DOCTOR:
+        raise HTTPException(status_code=422, detail="Вказаний користувач не є лікарем")
+    return doctor
+
+
+async def _validate_region_id(region_id: int, db: AsyncSession) -> None:
+    res = await db.execute(select(Region).where(Region.id == region_id))
+    if not res.scalar_one_or_none():
+        raise HTTPException(status_code=422, detail=f"Регіон з id={region_id} не існує")
 
 
 @router.get("", response_model=list[PatientListItem])
@@ -55,7 +74,6 @@ async def list_patients(
 
     if current_user.role == UserRole.DOCTOR:
         q = q.where(PatientProfile.doctor_id == current_user.id)
-
     elif current_user.role == UserRole.MODERATOR:
         q = q.join(User, PatientProfile.doctor_id == User.id).where(
             User.region_id == current_user.region_id
@@ -154,7 +172,7 @@ async def get_patient(
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
     out = PatientOut.model_validate(patient)
-    out.surname = _serialize_patient(patient, current_user)
+    out.surname = _serialize_surname(patient, current_user)
     return out
 
 
@@ -168,12 +186,22 @@ async def create_patient(
         select(PatientProfile).where(PatientProfile.email == body.email)
     )
     if exists.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Email вже використовується")
+        raise HTTPException(status_code=409, detail="Email вже використовується")
+
+    # Validate FK references before inserting
+    doctor_id = body.doctor_id
+    if doctor_id is None and current_user.role == UserRole.DOCTOR:
+        doctor_id = current_user.id
+    if doctor_id is not None:
+        await _validate_doctor_id(doctor_id, db)
+
+    if body.region_id is not None:
+        await _validate_region_id(body.region_id, db)
 
     encrypted = encrypt_surname(body.surname) if body.surname else None
 
     patient = PatientProfile(
-        doctor_id=body.doctor_id,
+        doctor_id=doctor_id,
         surname_encrypted=encrypted,
         initials=body.initials,
         sex=body.sex,
@@ -188,11 +216,16 @@ async def create_patient(
         diagnosis_year=body.diagnosis_year,
     )
     db.add(patient)
-    await db.commit()
-    await db.refresh(patient)
 
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Email вже використовується")
+
+    patient = await _fetch_patient(patient.id, db)
     out = PatientOut.model_validate(patient)
-    out.surname = _serialize_patient(patient, current_user)
+    out.surname = _serialize_surname(patient, current_user)
     return out
 
 
@@ -215,21 +248,36 @@ async def update_patient(
 
     data = body.model_dump(exclude_none=True)
 
+    if "email" in data and data["email"] != patient.email:
+        dup = await db.execute(
+            select(PatientProfile).where(PatientProfile.email == data["email"])
+        )
+        if dup.scalar_one_or_none():
+            raise HTTPException(status_code=409, detail="Email вже використовується")
+
+    if "doctor_id" in data:
+        await _validate_doctor_id(data["doctor_id"], db)
+
+    if "region_id" in data:
+        await _validate_region_id(data["region_id"], db)
+
     if "surname" in data:
         patient.surname_encrypted = encrypt_surname(data.pop("surname"))
 
     for field, value in data.items():
         setattr(patient, field, value)
 
-    await db.commit()
-    await db.refresh(patient)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="Конфлікт даних при оновленні")
 
+    patient = await _fetch_patient(patient_id, db)
     out = PatientOut.model_validate(patient)
-    out.surname = _serialize_patient(patient, current_user)
+    out.surname = _serialize_surname(patient, current_user)
     return out
 
-
-# ── Зміна статусу ────────────────────────────────────────────────────────────
 
 @router.patch("/{patient_id}/status", response_model=PatientOut)
 async def update_status(
@@ -239,20 +287,11 @@ async def update_status(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Правила зміни статусу:
-
-    DOCTOR:
-      - може тільки ATTACHED → DETACHED (відкріпити свого пацієнта)
-      - doctor_id пацієнта стає NULL автоматично
-      - інші переходи заборонені
-
-    MODERATOR / ADMIN:
-      - будь-який перехід
-      - при ATTACHED або PENDING — doctor_id обов'язковий
-      - при DETACHED — doctor_id автоматично стає NULL
+    DOCTOR:    ATTACHED → DETACHED тільки для свого пацієнта
+    MODERATOR/ADMIN: будь-який перехід; при ATTACHED/PENDING — doctor_id обов'язковий
     """
     result = await db.execute(
-        select(PatientProfile).options(*_load_options()).where(PatientProfile.id == patient_id)
+        select(PatientProfile).where(PatientProfile.id == patient_id)
     )
     patient = result.scalar_one_or_none()
     if not patient:
@@ -269,7 +308,6 @@ async def update_status(
                 status_code=403,
                 detail="Лікар може лише відкріпити пацієнта (DETACHED)",
             )
-
     elif not is_moderator_or_admin:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
@@ -279,6 +317,8 @@ async def update_status(
                 status_code=400,
                 detail="doctor_id обов'язковий при статусі ATTACHED або PENDING",
             )
+        if body.doctor_id:
+            await _validate_doctor_id(body.doctor_id, db)
 
     patient.status = body.status
 
@@ -286,14 +326,12 @@ async def update_status(
         patient.doctor_id = None
     elif is_moderator_or_admin and body.doctor_id:
         patient.doctor_id = body.doctor_id
-    elif is_doctor and body.status == PatientStatus.DETACHED:
-        patient.doctor_id = None
 
     await db.commit()
-    await db.refresh(patient)
 
+    patient = await _fetch_patient(patient_id, db)
     out = PatientOut.model_validate(patient)
-    out.surname = _serialize_patient(patient, current_user)
+    out.surname = _serialize_surname(patient, current_user)
     return out
 
 
