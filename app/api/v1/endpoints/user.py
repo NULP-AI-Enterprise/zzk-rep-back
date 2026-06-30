@@ -1,19 +1,49 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import secrets
+from datetime import datetime, timedelta, timezone
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import get_current_user, require_admin
 from app.db.session import get_db
-from app.models.models import User, UserRole
+from app.models.models import AuthToken, User, UserRole
 from app.schemas.schemas import MessageResponse, UserCreate, UserOut, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
+def _send_welcome_link(to: str, token: str, frontend_url: str) -> None:
+    import smtplib
+    from email.mime.text import MIMEText
+    from app.core.config import settings
+
+    link = f"{frontend_url}/auth/verify?token={token}"
+    msg = MIMEText(
+        f"Доброго дня!\n\nВас було додано до ЗЗК Реєстру. "
+        f"Для першого входу перейдіть за посиланням:\n{link}\n\n"
+        f"Посилання дійсне 24 години.",
+        "plain",
+        "utf-8",
+    )
+    msg["Subject"] = "ЗЗК Реєстр — підтвердження акаунта"
+    msg["From"] = settings.SMTP_USER
+    msg["To"] = to
+
+    try:
+        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+            server.starttls()
+            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            server.send_message(msg)
+    except Exception as e:
+        print(f"Помилка відправки welcome-листа: {e}")
+
+
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def create_user(
     body: UserCreate,
+    background_tasks: BackgroundTasks,
     _: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -32,8 +62,26 @@ async def create_user(
         job_place=body.job_place,
     )
     db.add(user)
+    await db.flush()  # get user.id before creating token
+
+    # Create a 24-hour welcome token so the new user can log in
+    token_value = secrets.token_urlsafe(48)
+    db.add(AuthToken(
+        token=token_value,
+        user_id=user.id,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+    ))
     await db.commit()
-    await db.refresh(user)
+
+    # Re-fetch with region loaded to avoid MissingGreenlet during serialization
+    result = await db.execute(
+        select(User).options(selectinload(User.region)).where(User.id == user.id)
+    )
+    user = result.scalar_one()
+
+    from app.core.config import settings
+    background_tasks.add_task(_send_welcome_link, body.email, token_value, settings.FRONTEND_URL)
+
     return user
 
 
@@ -96,9 +144,7 @@ async def update_user(
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
     result = await db.execute(
-        select(User)
-        .where(User.id == user_id)
-        .options(selectinload(User.region))
+        select(User).where(User.id == user_id)
     )
     user = result.scalar_one_or_none()
     if not user:
@@ -108,9 +154,12 @@ async def update_user(
         setattr(user, field, value)
 
     await db.commit()
-    await db.refresh(user)
 
-    return user
+    # Re-fetch to ensure region is loaded after potential region_id change
+    result = await db.execute(
+        select(User).options(selectinload(User.region)).where(User.id == user_id)
+    )
+    return result.scalar_one()
 
 
 @router.delete("/{user_id}", response_model=MessageResponse)

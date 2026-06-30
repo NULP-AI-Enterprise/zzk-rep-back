@@ -94,15 +94,21 @@ async def verify_magic_link(
     if not auth_token or auth_token.used_at is not None or auth_token.expires_at < now:
         raise HTTPException(status_code=400, detail="Невалідний або протермінований токен")
 
-    auth_token.used_at = datetime.now(timezone.utc)
-    await db.commit()
-
+    # Build identity BEFORE marking the token used — if something goes wrong here
+    # the token stays valid and the user can retry.
     if auth_token.user_id:
+        if auth_token.user is None:
+            raise HTTPException(status_code=400, detail="Невалідний або протермінований токен")
         sub_identity = f"user:{auth_token.user_id}"
         role_value = auth_token.user.role.value
-    else:
+    elif auth_token.patient_id:
         sub_identity = f"patient:{auth_token.patient_id}"
-        role_value = "patient"
+        role_value = "PATIENT"
+    else:
+        raise HTTPException(status_code=400, detail="Невалідний або протермінований токен")
+
+    auth_token.used_at = datetime.now(timezone.utc)
+    await db.commit()
 
     return TokenResponse(access_token=create_access_token({"sub": sub_identity, "role": role_value}))
 
