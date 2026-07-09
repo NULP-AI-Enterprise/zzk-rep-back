@@ -287,8 +287,12 @@ async def update_status(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    DOCTOR:    ATTACHED → DETACHED тільки для свого пацієнта
-    MODERATOR/ADMIN: будь-який перехід; при ATTACHED/PENDING — doctor_id обов'язковий
+    DOCTOR:
+      - PENDING/DETACHED → ATTACHED: дозволено якщо пацієнт без лікаря або вже цього лікаря;
+        doctor_id автоматично встановлюється на current_user.id
+      - ATTACHED → DETACHED: дозволено тільки для свого пацієнта
+      - Будь-який інший перехід: 403
+    MODERATOR/ADMIN: будь-який перехід; при ATTACHED — doctor_id обов'язковий
     """
     result = await db.execute(
         select(PatientProfile).where(PatientProfile.id == patient_id)
@@ -301,32 +305,40 @@ async def update_status(
     is_doctor = current_user.role == UserRole.DOCTOR
 
     if is_doctor:
-        if patient.doctor_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Доступ заборонено")
-        if body.status != PatientStatus.DETACHED:
+        if body.status == PatientStatus.ATTACHED:
+            # Лікар може підтвердити/прикріпити пацієнта якщо той ще без лікаря
+            # або вже прикріплений до цього ж лікаря
+            if patient.doctor_id is not None and patient.doctor_id != current_user.id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Пацієнт вже прикріплений до іншого лікаря",
+                )
+            patient.doctor_id = current_user.id
+        elif body.status == PatientStatus.DETACHED:
+            if patient.doctor_id != current_user.id:
+                raise HTTPException(status_code=403, detail="Доступ заборонено")
+            patient.doctor_id = None
+        else:
             raise HTTPException(
                 status_code=403,
-                detail="Лікар може лише відкріпити пацієнта (DETACHED)",
+                detail="Лікар може лише підтвердити (ATTACHED) або відкріпити (DETACHED) пацієнта",
             )
-    elif not is_moderator_or_admin:
+    elif is_moderator_or_admin:
+        if body.status == PatientStatus.ATTACHED:
+            if not body.doctor_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="doctor_id обов'язковий при статусі ATTACHED",
+                )
+            await _validate_doctor_id(body.doctor_id, db)
+            patient.doctor_id = body.doctor_id
+        elif body.status == PatientStatus.DETACHED:
+            patient.doctor_id = None
+        # PENDING — лише скидання без зміни doctor_id
+    else:
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
-    if body.status in (PatientStatus.ATTACHED, PatientStatus.PENDING):
-        if not is_doctor and not body.doctor_id:
-            raise HTTPException(
-                status_code=400,
-                detail="doctor_id обов'язковий при статусі ATTACHED або PENDING",
-            )
-        if body.doctor_id:
-            await _validate_doctor_id(body.doctor_id, db)
-
     patient.status = body.status
-
-    if body.status == PatientStatus.DETACHED:
-        patient.doctor_id = None
-    elif is_moderator_or_admin and body.doctor_id:
-        patient.doctor_id = body.doctor_id
-
     await db.commit()
 
     patient = await _fetch_patient(patient_id, db)
