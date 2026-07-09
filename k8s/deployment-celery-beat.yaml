@@ -20,7 +20,7 @@ spec:
       containers:
         - name: celery-beat
           # CI workflow pins this tag on every push to main
-          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:sha-a8d3f51
+          image: ghcr.io/nulp-ai-enterprise/zzk-rep-back:sha-8c87cb4
           command:
             - celery
             - -A
