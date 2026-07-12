@@ -248,7 +248,12 @@ async def create_clinical(
 
     if body.abdominal_surgeries:
         for s in body.surgeries:
-            db.add(ClinicalSurgery(record_id=record.id, operation_date=s.operation_date))
+            db.add(ClinicalSurgery(
+                record_id=record.id,
+                operation_date=s.operation_date,
+                operation_name=s.operation_name,
+                description=s.description,
+            ))
 
     for t in body.treatments:
         db.add(ClinicalTreatment(record_id=record.id, drug=t.drug, other_drug_name=t.other_drug_name))

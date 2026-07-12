@@ -138,6 +138,7 @@ class AuthToken(Base):
 
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
+    purpose = Column(String(20), nullable=False, default='login')
 
     user = relationship("User", backref="auth_tokens")
 
@@ -158,6 +159,7 @@ class PatientProfile(Base):
     sex = Column(Enum(SexType, native_enum=False), nullable=False)
     region_id = Column(Integer, ForeignKey("regions.id", ondelete="SET NULL"))
     email = Column(String(255), nullable=False, unique=True)
+    pending_email = Column(String(255), nullable=True)
     birth_year = Column(SmallInteger, nullable=False)
     weight = Column(Numeric(5, 1))
     height = Column(SmallInteger)
@@ -183,6 +185,7 @@ class PatientProfile(Base):
     clinical_records = relationship("StateRecordClinical", back_populates="patient", cascade="all, delete-orphan")
     self_assessments = relationship("PatientSelfAssessment", back_populates="patient", cascade="all, delete-orphan")
     tokens = relationship("SelfAssessmentToken", back_populates="patient", cascade="all, delete-orphan")
+    standalone_lab_results = relationship("PatientLabResult", back_populates="patient", cascade="all, delete-orphan")
 
     @property
     def role(self):
@@ -296,6 +299,8 @@ class ClinicalSurgery(Base):
     id = Column(Integer, primary_key=True)
     record_id = Column(Integer, ForeignKey("state_records_clinical.id", ondelete="CASCADE"), nullable=False)
     operation_date = Column(Date, nullable=False)
+    operation_name = Column(String(200), nullable=True)
+    description = Column(Text, nullable=True)
 
     record = relationship("StateRecordClinical", back_populates="surgeries")
 
@@ -322,6 +327,24 @@ class ClinicalResistantDrug(Base):
     __table_args__ = (UniqueConstraint("record_id", "drug"),)
 
     record = relationship("StateRecordClinical", back_populates="resistant_drugs")
+
+
+# ── Standalone Patient Lab Results ────────────────────────────────────────────
+
+class PatientLabResult(Base):
+    __tablename__ = "patient_lab_results"
+
+    id = Column(Integer, primary_key=True)
+    patient_id = Column(Integer, ForeignKey("patient_profiles.id", ondelete="CASCADE"), nullable=False)
+    lab_type = Column(Enum(LabType, native_enum=False), nullable=False)
+    value = Column(Numeric(10, 2), nullable=False)
+    result_date = Column(Date, nullable=False)
+    added_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    added_by_role = Column(String(20), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    patient = relationship("PatientProfile", back_populates="standalone_lab_results")
+    added_by_user = relationship("User")
 
 
 # ── Self Assessment (CD + UC в одній таблиці) ─────────────────────────────────

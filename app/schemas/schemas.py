@@ -242,6 +242,8 @@ class LabResultCreate(BaseModel):
 
 class SurgeryCreate(BaseModel):
     operation_date: date
+    operation_name: Optional[str] = None
+    description: Optional[str] = None
 
 
 class TreatmentCreate(BaseModel):
@@ -284,6 +286,8 @@ class LabResultOut(BaseModel):
 class SurgeryOut(BaseModel):
     id: int
     operation_date: date
+    operation_name: Optional[str] = None
+    description: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -394,6 +398,36 @@ class ConsentFileOut(BaseModel):
     uploaded_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── Standalone Patient Lab Results ────────────────────────────────────────────
+
+class PatientLabResultCreate(BaseModel):
+    lab_type: LabType
+    value: float = Field(gt=0)
+    result_date: date
+
+
+class PatientLabResultOut(BaseModel):
+    id: int
+    lab_type: LabType
+    value: float
+    result_date: date
+    added_by_role: str
+    added_by_name: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ── Email Change ──────────────────────────────────────────────────────────────
+
+class EmailChangeRequest(BaseModel):
+    new_email: EmailStr
+
+
+class ConfirmEmailChange(BaseModel):
+    token: str
 
 
 # ── Misc ──────────────────────────────────────────────────────────────────────

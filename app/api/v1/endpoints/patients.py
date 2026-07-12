@@ -1,20 +1,24 @@
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.deps import get_current_user, require_doctor_or_admin
+from app.core.deps import get_current_user, require_any, require_doctor_or_admin
 from app.core.security import decrypt_surname, encrypt_surname
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import (
-    PatientProfile, PatientStatus, Region, User, UserRole,
+    AuthToken, PatientLabResult, PatientProfile, PatientStatus, Region, User, UserRole,
 )
 from app.schemas.schemas import (
-    MessageResponse, PatientCreate, PatientListItem,
-    PatientOut, PatientStatusUpdate, PatientUpdate,
+    ConfirmEmailChange, EmailChangeRequest, MessageResponse,
+    PatientCreate, PatientLabResultCreate, PatientLabResultOut,
+    PatientListItem, PatientOut, PatientStatusUpdate, PatientUpdate,
 )
 
 router = APIRouter(prefix="/patients", tags=["Patients"])
@@ -345,6 +349,153 @@ async def update_status(
     out = PatientOut.model_validate(patient)
     out.surname = _serialize_surname(patient, current_user)
     return out
+
+
+@router.get("/{patient_id}/lab-results", response_model=list[PatientLabResultOut])
+async def list_patient_lab_results(
+    patient_id: int,
+    current_user: User | PatientProfile = Depends(require_any),
+    db: AsyncSession = Depends(get_db),
+):
+    patient = await _fetch_patient(patient_id, db)
+    # Patients can only view their own results
+    if isinstance(current_user, PatientProfile) and current_user.id != patient_id:
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+
+    result = await db.execute(
+        select(PatientLabResult)
+        .options(selectinload(PatientLabResult.added_by_user))
+        .where(PatientLabResult.patient_id == patient_id)
+        .order_by(PatientLabResult.result_date)
+    )
+    rows = result.scalars().all()
+    out = []
+    for r in rows:
+        added_by_name = None
+        if r.added_by_user:
+            added_by_name = f"{r.added_by_user.last_name} {r.added_by_user.first_name}"
+        out.append(PatientLabResultOut(
+            id=r.id,
+            lab_type=r.lab_type,
+            value=float(r.value),
+            result_date=r.result_date,
+            added_by_role=r.added_by_role,
+            added_by_name=added_by_name,
+            created_at=r.created_at,
+        ))
+    return out
+
+
+@router.post("/{patient_id}/lab-results", response_model=PatientLabResultOut, status_code=201)
+async def add_patient_lab_result(
+    patient_id: int,
+    body: PatientLabResultCreate,
+    current_user: User | PatientProfile = Depends(require_any),
+    db: AsyncSession = Depends(get_db),
+):
+    patient = await _fetch_patient(patient_id, db)
+
+    if isinstance(current_user, PatientProfile):
+        if current_user.id != patient_id:
+            raise HTTPException(status_code=403, detail="Доступ заборонено")
+        added_by_user_id = None
+        added_by_role = "PATIENT"
+    else:
+        if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Доступ заборонено")
+        added_by_user_id = current_user.id
+        added_by_role = current_user.role.value
+
+    lab = PatientLabResult(
+        patient_id=patient_id,
+        lab_type=body.lab_type,
+        value=body.value,
+        result_date=body.result_date,
+        added_by_user_id=added_by_user_id,
+        added_by_role=added_by_role,
+    )
+    db.add(lab)
+    await db.commit()
+    await db.refresh(lab)
+
+    added_by_name = None
+    if added_by_user_id:
+        user_res = await db.execute(select(User).where(User.id == added_by_user_id))
+        u = user_res.scalar_one_or_none()
+        if u:
+            added_by_name = f"{u.last_name} {u.first_name}"
+
+    return PatientLabResultOut(
+        id=lab.id,
+        lab_type=lab.lab_type,
+        value=float(lab.value),
+        result_date=lab.result_date,
+        added_by_role=lab.added_by_role,
+        added_by_name=added_by_name,
+        created_at=lab.created_at,
+    )
+
+
+@router.post("/{patient_id}/request-email-change", response_model=MessageResponse)
+async def request_email_change(
+    patient_id: int,
+    body: EmailChangeRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User | PatientProfile = Depends(require_doctor_or_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    import smtplib
+    from email.mime.text import MIMEText
+
+    patient = await _fetch_patient(patient_id, db)
+    if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+
+    # Check new email not already taken
+    dup = await db.execute(
+        select(PatientProfile).where(PatientProfile.email == str(body.new_email))
+    )
+    if dup.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Email вже використовується")
+
+    token_value = secrets.token_urlsafe(48)
+    auth_token = AuthToken(
+        token=token_value,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        patient_id=patient_id,
+        purpose='email_change',
+    )
+
+    # Fetch patient row to update pending_email
+    pat_res = await db.execute(select(PatientProfile).where(PatientProfile.id == patient_id))
+    pat = pat_res.scalar_one()
+    pat.pending_email = str(body.new_email)
+
+    db.add(auth_token)
+    await db.commit()
+
+    def _send(to: str, token: str) -> None:
+        link = f"{settings.FRONTEND_URL}/auth/confirm-email?token={token}"
+        msg = MIMEText(
+            f"Доброго дня!\n\nДля підтвердження зміни email перейдіть за посиланням:\n{link}\n\n"
+            f"Посилання дійсне 24 години.",
+            "plain",
+            "utf-8",
+        )
+        msg["Subject"] = "ЗЗК Реєстр — підтвердження зміни Email"
+        msg["From"] = settings.SMTP_USER
+        msg["To"] = to
+        try:
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+                server.starttls()
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.send_message(msg)
+        except Exception as e:
+            print(f"Помилка відправки листа: {e}")
+
+    background_tasks.add_task(_send, str(body.new_email), token_value)
+
+    return MessageResponse(message="Листа з підтвердженням надіслано на новий email")
 
 
 @router.delete("/{patient_id}", response_model=MessageResponse)

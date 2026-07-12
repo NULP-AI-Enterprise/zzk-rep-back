@@ -15,7 +15,7 @@ from app.core.deps import get_current_user
 from app.core.security import create_access_token
 from app.db.session import get_db
 from app.models.models import AuthToken, User, PatientProfile
-from app.schemas.schemas import TokenResponse, UserOut, PatientMeOut
+from app.schemas.schemas import MessageResponse, TokenResponse, UserOut, PatientMeOut
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -111,6 +111,39 @@ async def verify_magic_link(
     await db.commit()
 
     return TokenResponse(access_token=create_access_token({"sub": sub_identity, "role": role_value}))
+
+
+@router.post("/confirm-email-change", response_model=MessageResponse)
+async def confirm_email_change(
+        body: VerifyTokenRequest,
+        db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(AuthToken)
+        .options(selectinload(AuthToken.patient))
+        .where(AuthToken.token == body.token)
+    )
+    auth_token = result.scalar_one_or_none()
+
+    if (
+        not auth_token
+        or auth_token.used_at is not None
+        or auth_token.expires_at < now
+        or auth_token.purpose != 'email_change'
+    ):
+        raise HTTPException(status_code=400, detail="Невалідний або протермінований токен")
+
+    patient = auth_token.patient
+    if not patient or not patient.pending_email:
+        raise HTTPException(status_code=400, detail="Зміна email не знайдена")
+
+    patient.email = patient.pending_email
+    patient.pending_email = None
+    auth_token.used_at = now
+    await db.commit()
+
+    return MessageResponse(message="Email успішно змінено")
 
 
 @router.get("/me", response_model=Union[UserOut, PatientMeOut])
