@@ -404,7 +404,7 @@ class ConsentFileOut(BaseModel):
 
 class PatientLabResultCreate(BaseModel):
     lab_type: LabType
-    value: float = Field(gt=0)
+    value: float = Field(ge=0)
     result_date: date
 
 
