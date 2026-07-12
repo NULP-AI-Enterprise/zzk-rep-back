@@ -30,20 +30,64 @@ async def _fetch_user_with_region(user_id: int, db: AsyncSession) -> User:
 
 def _send_welcome_link(to: str, token: str, frontend_url: str) -> None:
     import smtplib
+    from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
+    from urllib.parse import quote
     from app.core.config import settings
 
-    link = f"{frontend_url}/auth/verify?token={token}"
-    msg = MIMEText(
-        f"Доброго дня!\n\nВас було додано до ЗЗК Реєстру. "
-        f"Для першого входу перейдіть за посиланням:\n{link}\n\n"
-        f"Посилання дійсне 24 години.",
-        "plain",
-        "utf-8",
-    )
+    safe_token = quote(token, safe='')
+    link = f"{frontend_url}/auth/verify?token={safe_token}"
+
+    msg = MIMEMultipart('alternative')
     msg["Subject"] = "ЗЗК Реєстр — підтвердження акаунта"
     msg["From"] = settings.SMTP_USER
     msg["To"] = to
+
+    plain_text = (
+        f"Доброго дня!\n\n"
+        f"Вас було додано до ЗЗК Реєстру. "
+        f"Для першого входу перейдіть за посиланням:\n"
+        f"<{link}>\n\n"
+        f"Посилання дійсне 24 години."
+    )
+
+    html_text = f"""\
+<!DOCTYPE html>
+<html lang="uk">
+<head><meta charset="utf-8"></head>
+<body style="font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:0;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:12px;padding:40px;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr><td style="padding-bottom:24px;">
+          <h2 style="margin:0;color:#1a1a1a;font-size:22px;">ЗЗК Реєстр</h2>
+        </td></tr>
+        <tr><td style="color:#444;font-size:15px;line-height:1.6;padding-bottom:28px;">
+          <p style="margin:0 0 12px 0;">Доброго дня!</p>
+          <p style="margin:0;">Вас було додано до ЗЗК Реєстру.
+          Для першого входу натисніть кнопку нижче.</p>
+        </td></tr>
+        <tr><td align="center" style="padding-bottom:28px;">
+          <a href="{link}"
+             style="display:inline-block;background:#4F46E5;color:#ffffff;text-decoration:none;
+                    font-size:15px;font-weight:600;padding:14px 32px;border-radius:8px;">
+            Підтвердити акаунт
+          </a>
+        </td></tr>
+        <tr><td style="color:#888;font-size:13px;line-height:1.5;border-top:1px solid #eee;padding-top:20px;">
+          <p style="margin:0 0 8px 0;">Якщо кнопка не працює, скопіюйте це посилання у браузер:</p>
+          <p style="margin:0;word-break:break-all;color:#4F46E5;">{link}</p>
+          <p style="margin:12px 0 0 0;">Посилання дійсне 24 години.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+    msg.attach(MIMEText(plain_text, "plain", "utf-8"))
+    msg.attach(MIMEText(html_text, "html", "utf-8"))
 
     try:
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
