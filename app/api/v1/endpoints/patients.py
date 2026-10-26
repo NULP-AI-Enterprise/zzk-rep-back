@@ -3,14 +3,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.deps import get_current_user, require_any, require_doctor_or_admin
+from app.api.v1.endpoints.auth import can_issue_login_token, send_login_link
+from app.core.deps import get_accessible_patient, get_current_user, require_any, require_doctor_or_admin
+from app.core.mailer import build_link, send_action_mail
 from app.core.security import decrypt_surname, encrypt_surname
-from app.core.config import settings
 from app.db.session import get_db
 from app.models.models import (
     AuthToken, PatientLabResult, PatientProfile, PatientStatus, Region, User, UserRole,
@@ -18,7 +19,7 @@ from app.models.models import (
 from app.schemas.schemas import (
     ConfirmEmailChange, EmailChangeRequest, MessageResponse,
     PatientCreate, PatientLabResultCreate, PatientLabResultOut,
-    PatientListItem, PatientOut, PatientStatusUpdate, PatientUpdate,
+    PatientListItem, PatientOut, PatientRegister, PatientStatusUpdate, PatientUpdate,
 )
 
 router = APIRouter(prefix="/patients", tags=["Patients"])
@@ -64,6 +65,114 @@ async def _validate_region_id(region_id: int, db: AsyncSession) -> None:
         raise HTTPException(status_code=422, detail=f"Регіон з id={region_id} не існує")
 
 
+async def _email_taken(email: str, db: AsyncSession, exclude_patient_id: Optional[int] = None) -> bool:
+    """Case-insensitive uniqueness across patients AND staff (login resolves users first)."""
+    q = select(PatientProfile.id).where(func.lower(PatientProfile.email) == email)
+    if exclude_patient_id is not None:
+        q = q.where(PatientProfile.id != exclude_patient_id)
+    if (await db.execute(q)).first():
+        return True
+    return (await db.execute(select(User.id).where(func.lower(User.email) == email))).first() is not None
+
+
+def _moderator_region_filter(region_id: Optional[int]):
+    """Patients of the moderator's region: by the patient's own region or by their doctor's region."""
+    if region_id is None:
+        return false()
+    return or_(
+        PatientProfile.region_id == region_id,
+        PatientProfile.doctor_id.in_(select(User.id).where(User.region_id == region_id)),
+    )
+
+
+def _doctor_pool(doctor: User):
+    """Patients nobody has taken yet (self-registered or detached) — any doctor may pick them up.
+
+    Not limited to the doctor's region: patients choose their region themselves and may
+    pick a different one than the doctor who will actually treat them.
+    """
+    return PatientProfile.doctor_id.is_(None)
+
+
+def _scope_to_user(q, current_user: User):
+    """Restrict a patient query to what the current staff user may see."""
+    if current_user.role == UserRole.DOCTOR:
+        return q.where(PatientProfile.doctor_id == current_user.id)
+    if current_user.role == UserRole.MODERATOR:
+        return q.where(_moderator_region_filter(current_user.region_id))
+    return q
+
+
+@router.post("/register", status_code=status.HTTP_202_ACCEPTED)
+async def register_patient(
+    body: PatientRegister,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Public self-registration. Creates a PENDING patient without a doctor; staff attach later.
+
+    The response is identical whether or not the e-mail is already known (no account enumeration).
+    """
+    generic = {"message": "Якщо дані коректні — на вказаний email надіслано посилання для входу"}
+    email = body.email.strip().lower()
+
+    # Global flood guard: public endpoint, so cap self-registrations per hour
+    recent = await db.execute(
+        select(func.count(PatientProfile.id)).where(
+            PatientProfile.doctor_id.is_(None),
+            PatientProfile.created_at > datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+    )
+    if recent.scalar_one() >= 100:
+        raise HTTPException(status_code=429, detail="Забагато реєстрацій. Спробуйте пізніше")
+
+    await _validate_region_id(body.region_id, db)
+
+    existing = await db.execute(select(PatientProfile).where(func.lower(PatientProfile.email) == email))
+    existing_patient = existing.scalars().first()
+
+    if existing_patient is None and await _email_taken(email, db):
+        return generic  # belongs to staff — do nothing, reveal nothing
+
+    if existing_patient is None:
+        patient = PatientProfile(
+            initials=body.initials,
+            sex=body.sex,
+            region_id=body.region_id,
+            email=email,
+            birth_year=body.birth_year,
+            weight=body.weight,
+            height=body.height,
+            disability=body.disability,
+            diagnosis=body.diagnosis,
+            histologically_confirmed=body.histologically_confirmed,
+            diagnosis_year=body.diagnosis_year,
+            status=PatientStatus.PENDING,
+        )
+        db.add(patient)
+        try:
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            return generic
+    else:
+        patient = existing_patient
+
+    if await can_issue_login_token(db, patient_id=patient.id):
+        token_value = secrets.token_urlsafe(48)
+        db.add(AuthToken(
+            token=token_value,
+            patient_id=patient.id,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            purpose="login",
+        ))
+        await db.commit()
+        background_tasks.add_task(send_login_link, patient.email, token_value, valid_for="24 години")
+    else:
+        await db.commit()
+    return generic
+
+
 @router.get("", response_model=list[PatientListItem])
 async def list_patients(
     status_filter: Optional[PatientStatus] = Query(None, alias="status"),
@@ -74,14 +183,7 @@ async def list_patients(
     if current_user.role not in (UserRole.DOCTOR, UserRole.MODERATOR, UserRole.ADMIN):
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
-    q = select(PatientProfile).options(*_load_options())
-
-    if current_user.role == UserRole.DOCTOR:
-        q = q.where(PatientProfile.doctor_id == current_user.id)
-    elif current_user.role == UserRole.MODERATOR:
-        q = q.join(User, PatientProfile.doctor_id == User.id).where(
-            User.region_id == current_user.region_id
-        )
+    q = _scope_to_user(select(PatientProfile).options(*_load_options()), current_user)
 
     if status_filter:
         q = q.where(PatientProfile.status == status_filter)
@@ -104,11 +206,10 @@ async def list_pending(
         PatientProfile.status == PatientStatus.PENDING
     )
     if current_user.role == UserRole.DOCTOR:
-        q = q.where(PatientProfile.doctor_id == current_user.id)
-    elif current_user.role == UserRole.MODERATOR:
-        q = q.join(User, PatientProfile.doctor_id == User.id).where(
-            User.region_id == current_user.region_id
-        )
+        # own pending patients + self-registered patients still waiting for a doctor
+        q = q.where(or_(PatientProfile.doctor_id == current_user.id, _doctor_pool(current_user)))
+    else:
+        q = _scope_to_user(q, current_user)
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
@@ -122,15 +223,12 @@ async def list_attached(
     if current_user.role not in (UserRole.DOCTOR, UserRole.MODERATOR, UserRole.ADMIN):
         raise HTTPException(status_code=403, detail="Доступ заборонено")
 
-    q = select(PatientProfile).options(*_load_options()).where(
-        PatientProfile.status == PatientStatus.ATTACHED
+    q = _scope_to_user(
+        select(PatientProfile).options(*_load_options()).where(
+            PatientProfile.status == PatientStatus.ATTACHED
+        ),
+        current_user,
     )
-    if current_user.role == UserRole.DOCTOR:
-        q = q.where(PatientProfile.doctor_id == current_user.id)
-    elif current_user.role == UserRole.MODERATOR:
-        q = q.join(User, PatientProfile.doctor_id == User.id).where(
-            User.region_id == current_user.region_id
-        )
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
@@ -148,9 +246,10 @@ async def list_detached(
         PatientProfile.status == PatientStatus.DETACHED
     )
     if current_user.role == UserRole.DOCTOR:
-        q = q.where(PatientProfile.doctor_id == current_user.id)
+        # a detach clears doctor_id, so detached patients live in the shared pool
+        q = q.where(or_(PatientProfile.doctor_id == current_user.id, _doctor_pool(current_user)))
     elif current_user.role == UserRole.MODERATOR:
-        q = q.where(PatientProfile.region_id == current_user.region_id)
+        q = q.where(_moderator_region_filter(current_user.region_id))
 
     result = await db.execute(q.order_by(PatientProfile.created_at.desc()))
     return result.scalars().all()
@@ -169,11 +268,15 @@ async def get_patient(
     if not patient:
         raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
 
-    if current_user.role == UserRole.PATIENT and patient.id != current_user.id:
-        raise HTTPException(status_code=403, detail="Доступ заборонено")
-
-    if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Доступ заборонено")
+    # A doctor may open a self-registered patient who still has no doctor, to decide on attaching
+    unassigned_pending = (
+        isinstance(current_user, User)
+        and current_user.role == UserRole.DOCTOR
+        and patient.doctor_id is None
+        and patient.status in (PatientStatus.PENDING, PatientStatus.DETACHED)
+    )
+    if not unassigned_pending:
+        await get_accessible_patient(patient_id, current_user, db)
 
     out = PatientOut.model_validate(patient)
     out.surname = _serialize_surname(patient, current_user)
@@ -186,15 +289,13 @@ async def create_patient(
     current_user: User = Depends(require_doctor_or_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    exists = await db.execute(
-        select(PatientProfile).where(PatientProfile.email == body.email)
-    )
-    if exists.scalar_one_or_none():
+    email = body.email.strip().lower()
+    if await _email_taken(email, db):
         raise HTTPException(status_code=409, detail="Email вже використовується")
 
-    # Validate FK references before inserting
+    # Validate FK references before inserting. A doctor can only create patients for themselves.
     doctor_id = body.doctor_id
-    if doctor_id is None and current_user.role == UserRole.DOCTOR:
+    if current_user.role == UserRole.DOCTOR:
         doctor_id = current_user.id
     if doctor_id is not None:
         await _validate_doctor_id(doctor_id, db)
@@ -210,7 +311,7 @@ async def create_patient(
         initials=body.initials,
         sex=body.sex,
         region_id=body.region_id,
-        email=body.email,
+        email=email,
         birth_year=body.birth_year,
         weight=body.weight,
         height=body.height,
@@ -252,14 +353,25 @@ async def update_patient(
 
     data = body.model_dump(exclude_none=True)
 
-    if "email" in data and data["email"] != patient.email:
-        dup = await db.execute(
-            select(PatientProfile).where(PatientProfile.email == data["email"])
-        )
-        if dup.scalar_one_or_none():
+    # echoing the current value back is harmless; only a real change is restricted
+    if "email" in data and data["email"].strip().lower() == patient.email.lower():
+        data.pop("email")
+    if "doctor_id" in data and data["doctor_id"] == patient.doctor_id:
+        data.pop("doctor_id")
+
+    if "email" in data:
+        if current_user.role != UserRole.ADMIN:
+            raise HTTPException(
+                status_code=403,
+                detail="Email пацієнта змінюється через підтвердження на новий email",
+            )
+        data["email"] = data["email"].strip().lower()
+        if data["email"] != patient.email.lower() and await _email_taken(data["email"], db, patient_id):
             raise HTTPException(status_code=409, detail="Email вже використовується")
 
     if "doctor_id" in data:
+        if current_user.role != UserRole.ADMIN:
+            raise HTTPException(status_code=403, detail="Змінити лікаря може лише адміністратор")
         await _validate_doctor_id(data["doctor_id"], db)
 
     if "region_id" in data:
@@ -317,7 +429,18 @@ async def update_status(
                     status_code=403,
                     detail="Пацієнт вже прикріплений до іншого лікаря",
                 )
-            patient.doctor_id = current_user.id
+            # Atomic claim: two doctors confirming the same pool patient must not both succeed
+            claimed = await db.execute(
+                update(PatientProfile)
+                .where(
+                    PatientProfile.id == patient_id,
+                    or_(PatientProfile.doctor_id.is_(None), PatientProfile.doctor_id == current_user.id),
+                )
+                .values(doctor_id=current_user.id)
+            )
+            if claimed.rowcount != 1:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Пацієнта щойно прикріпив інший лікар")
         elif body.status == PatientStatus.DETACHED:
             if patient.doctor_id != current_user.id:
                 raise HTTPException(status_code=403, detail="Доступ заборонено")
@@ -328,13 +451,17 @@ async def update_status(
                 detail="Лікар може лише підтвердити (ATTACHED) або відкріпити (DETACHED) пацієнта",
             )
     elif is_moderator_or_admin:
+        if current_user.role == UserRole.MODERATOR:
+            await get_accessible_patient(patient_id, current_user, db)
         if body.status == PatientStatus.ATTACHED:
             if not body.doctor_id:
                 raise HTTPException(
                     status_code=400,
                     detail="doctor_id обов'язковий при статусі ATTACHED",
                 )
-            await _validate_doctor_id(body.doctor_id, db)
+            doctor = await _validate_doctor_id(body.doctor_id, db)
+            if current_user.role == UserRole.MODERATOR and doctor.region_id != current_user.region_id:
+                raise HTTPException(status_code=403, detail="Можна прикріплювати лише до лікарів свого регіону")
             patient.doctor_id = body.doctor_id
         elif body.status == PatientStatus.DETACHED:
             patient.doctor_id = None
@@ -357,10 +484,7 @@ async def list_patient_lab_results(
     current_user: User | PatientProfile = Depends(require_any),
     db: AsyncSession = Depends(get_db),
 ):
-    patient = await _fetch_patient(patient_id, db)
-    # Patients can only view their own results
-    if isinstance(current_user, PatientProfile) and current_user.id != patient_id:
-        raise HTTPException(status_code=403, detail="Доступ заборонено")
+    await get_accessible_patient(patient_id, current_user, db)
 
     result = await db.execute(
         select(PatientLabResult)
@@ -393,16 +517,14 @@ async def add_patient_lab_result(
     current_user: User | PatientProfile = Depends(require_any),
     db: AsyncSession = Depends(get_db),
 ):
-    patient = await _fetch_patient(patient_id, db)
+    await get_accessible_patient(patient_id, current_user, db)
 
     if isinstance(current_user, PatientProfile):
-        if current_user.id != patient_id:
-            raise HTTPException(status_code=403, detail="Доступ заборонено")
         added_by_user_id = None
         added_by_role = "PATIENT"
     else:
-        if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Доступ заборонено")
+        if current_user.role == UserRole.MODERATOR:
+            raise HTTPException(status_code=403, detail="Модератор не може додавати результати")
         added_by_user_id = current_user.id
         added_by_role = current_user.role.value
 
@@ -444,56 +566,43 @@ async def request_email_change(
     current_user: User | PatientProfile = Depends(require_doctor_or_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    import smtplib
-    from email.mime.text import MIMEText
+    patient = await get_accessible_patient(patient_id, current_user, db)
 
-    patient = await _fetch_patient(patient_id, db)
-    if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Доступ заборонено")
-
-    # Check new email not already taken
-    dup = await db.execute(
-        select(PatientProfile).where(PatientProfile.email == str(body.new_email))
-    )
-    if dup.scalar_one_or_none():
+    new_email = str(body.new_email).strip().lower()
+    if await _email_taken(new_email, db, patient_id):
         raise HTTPException(status_code=409, detail="Email вже використовується")
 
-    token_value = secrets.token_urlsafe(48)
-    auth_token = AuthToken(
-        token=token_value,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
-        patient_id=patient_id,
-        purpose='email_change',
+    # Only the newest request may be confirmed: older pending links must not apply a different address
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        update(AuthToken)
+        .where(
+            AuthToken.patient_id == patient_id,
+            AuthToken.purpose == "email_change",
+            AuthToken.used_at.is_(None),
+        )
+        .values(used_at=now)
     )
 
-    # Fetch patient row to update pending_email
-    pat_res = await db.execute(select(PatientProfile).where(PatientProfile.id == patient_id))
-    pat = pat_res.scalar_one()
-    pat.pending_email = str(body.new_email)
-
-    db.add(auth_token)
+    token_value = secrets.token_urlsafe(48)
+    db.add(AuthToken(
+        token=token_value,
+        expires_at=now + timedelta(hours=24),
+        patient_id=patient_id,
+        purpose="email_change",
+    ))
+    patient.pending_email = new_email
     await db.commit()
 
-    def _send(to: str, token: str) -> None:
-        link = f"{settings.FRONTEND_URL}/auth/confirm-email?token={token}"
-        msg = MIMEText(
-            f"Доброго дня!\n\nДля підтвердження зміни email перейдіть за посиланням:\n{link}\n\n"
-            f"Посилання дійсне 24 години.",
-            "plain",
-            "utf-8",
-        )
-        msg["Subject"] = "ЗЗК Реєстр — підтвердження зміни Email"
-        msg["From"] = settings.SMTP_USER
-        msg["To"] = to
-        try:
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-                server.starttls()
-                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                server.send_message(msg)
-        except Exception as e:
-            print(f"Помилка відправки листа: {e}")
-
-    background_tasks.add_task(_send, str(body.new_email), token_value)
+    background_tasks.add_task(
+        send_action_mail,
+        new_email,
+        "ЗЗК Реєстр — підтвердження зміни Email",
+        "Для підтвердження зміни email натисніть кнопку нижче.",
+        "Підтвердити email",
+        build_link("/auth/confirm-email", token_value),
+        "24 години",
+    )
 
     return MessageResponse(message="Листа з підтвердженням надіслано на новий email")
 

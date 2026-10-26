@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import List, Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator, computed_field, model_validator
 
@@ -41,12 +41,23 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
+    role: Optional[UserRole] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     patronymic: Optional[str] = None
     region_id: Optional[int] = None
     job_position: Optional[str] = None
     job_place: Optional[str] = None
+
+
+class DoctorBrief(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    patronymic: Optional[str] = None
+    region: Optional[RegionOut] = None
+
+    model_config = {"from_attributes": True}
 
 
 class UserOut(BaseModel):
@@ -66,7 +77,75 @@ class UserOut(BaseModel):
 
 # ── Patient ───────────────────────────────────────────────────────────────────
 
-class PatientCreate(BaseModel):
+def normalize_initials(value: str) -> str:
+    """'тгк' / 'Т.Г.К.' / 'Т Г К' -> 'ТГК' (2-4 letters, no surname is collected)."""
+    cleaned = "".join(ch for ch in value if not ch.isspace() and ch not in ".-'’ʼ").upper()
+    if not (2 <= len(cleaned) <= 4) or not cleaned.isalpha():
+        raise ValueError("Ініціали: 2–4 літери, наприклад ТГК (перша літера прізвища, імені та по батькові)")
+    return cleaned
+
+
+class _PatientFieldChecks(BaseModel):
+    """Shared range checks so bad input gives a 422, not a DB constraint 409/500."""
+
+    @field_validator("initials", check_fields=False)
+    @classmethod
+    def _check_initials(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else normalize_initials(v)
+
+    @field_validator("birth_year", check_fields=False)
+    @classmethod
+    def _check_birth_year(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (1900 <= v <= date.today().year):
+            raise ValueError(f"Рік народження має бути між 1900 та {date.today().year}")
+        return v
+
+    @field_validator("weight", check_fields=False)
+    @classmethod
+    def _check_weight(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not (0 < v < 500):
+            raise ValueError("Вага має бути від 0 до 500 кг")
+        return v
+
+    @field_validator("height", check_fields=False)
+    @classmethod
+    def _check_height(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (0 < v < 300):
+            raise ValueError("Зріст має бути від 0 до 300 см")
+        return v
+
+    @field_validator("diagnosis_year", check_fields=False)
+    @classmethod
+    def _check_diagnosis_year(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (1900 <= v <= date.today().year):
+            raise ValueError(f"Рік діагнозу має бути між 1900 та {date.today().year}")
+        return v
+
+
+class PatientRegister(_PatientFieldChecks):
+    """Public self-registration: general data the patient enters about themselves."""
+    initials: str
+    sex: SexType
+    region_id: int
+    email: EmailStr
+    birth_year: int
+    weight: Optional[float] = None
+    height: Optional[int] = None
+    disability: DisabilityGroup = DisabilityGroup.NONE
+    diagnosis: DiagnosisType = DiagnosisType.UNCLASSIFIED
+    histologically_confirmed: HistologyStatus = HistologyStatus.UNKNOWN
+    diagnosis_year: Optional[int] = None
+    consent: bool
+
+    @field_validator("consent")
+    @classmethod
+    def _check_consent(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("Необхідна згода на обробку даних")
+        return v
+
+
+class PatientCreate(_PatientFieldChecks):
     surname: Optional[str] = None
     initials: str
     sex: SexType
@@ -81,15 +160,8 @@ class PatientCreate(BaseModel):
     diagnosis_year: Optional[int] = None
     doctor_id: Optional[int] = None
 
-    @field_validator("birth_year")
-    @classmethod
-    def validate_birth_year(cls, v: int) -> int:
-        if not (1900 <= v <= 2100):
-            raise ValueError("birth_year має бути між 1900 та 2100")
-        return v
 
-
-class PatientUpdate(BaseModel):
+class PatientUpdate(_PatientFieldChecks):
     surname: Optional[str] = None
     initials: Optional[str] = None
     sex: Optional[SexType] = None
@@ -163,17 +235,23 @@ class PatientMeOut(BaseModel):
 # ── CD Record (Хвороба Крона) ─────────────────────────────────────────────────
 
 class CdRecordCreate(BaseModel):
-    localization: Optional[str] = None
+    localization: Optional[str] = Field(None, max_length=2)
     perianal_lesions: Optional[bool] = None
-    behavior: Optional[str] = None
+    behavior: Optional[str] = Field(None, max_length=2)
     general_wellbeing: Optional[int] = Field(None, ge=0, le=4)
     abdominal_pain: Optional[int] = Field(None, ge=0, le=3)
-    stool_count: Optional[int] = Field(None, ge=0)
+    stool_count: Optional[int] = Field(None, ge=0, le=100)
     abdominal_mass: Optional[int] = Field(None, ge=0, le=3)
-    ses_cd: Optional[str] = None
-    ses_cd_other: Optional[str] = None
+    ses_cd: Optional[str] = Field(None, max_length=10)
+    ses_cd_other: Optional[str] = Field(None, max_length=200)
     complications: List[CdComplicationType] = []
-    comments: Optional[str] = None
+    comments: Optional[str] = Field(None, max_length=5000)
+
+    @field_validator("complications")
+    @classmethod
+    def _dedupe_complications(cls, v: List[CdComplicationType]) -> List[CdComplicationType]:
+        # (record_id, complication) is unique in the DB; duplicates would 500 and inflate the HBI score
+        return list(dict.fromkeys(v))
 
 
 class CdComplicationOut(BaseModel):
@@ -206,13 +284,13 @@ class CdRecordOut(BaseModel):
 # ── UC Record (Виразковий коліт) ──────────────────────────────────────────────
 
 class UcRecordCreate(BaseModel):
-    extent: Optional[str] = None
+    extent: Optional[str] = Field(None, max_length=2)
     stool_frequency: Optional[int] = Field(None, ge=0, le=3)
     rectal_bleeding: Optional[int] = Field(None, ge=0, le=3)
     physician_assessment: Optional[int] = Field(None, ge=0, le=3)
     endoscopic_mayo: Optional[int] = Field(None, ge=0, le=3)
-    endoscopic_mayo_other: Optional[str] = None
-    comments: Optional[str] = None
+    endoscopic_mayo_other: Optional[str] = Field(None, max_length=200)
+    comments: Optional[str] = Field(None, max_length=5000)
 
 
 class UcRecordOut(BaseModel):
@@ -234,40 +312,51 @@ class UcRecordOut(BaseModel):
 
 # ── Clinical Record ───────────────────────────────────────────────────────────
 
+def _not_future(v: Optional[date]) -> Optional[date]:
+    # +1 day: the server runs on UTC, users in Ukraine are ahead of it for a few hours
+    if v is not None and v > date.today() + timedelta(days=1):
+        raise ValueError("Дата не може бути в майбутньому")
+    return v
+
+
 class LabResultCreate(BaseModel):
     lab_type: LabType
-    value: float = Field(gt=0)
+    value: float = Field(ge=0, le=99999999, allow_inf_nan=False)
     result_date: date
+
+    _check_date = field_validator("result_date")(_not_future)
 
 
 class SurgeryCreate(BaseModel):
     operation_date: date
-    operation_name: Optional[str] = None
-    description: Optional[str] = None
+    operation_name: Optional[str] = Field(None, max_length=200)
+    description: Optional[str] = Field(None, max_length=5000)
+
+    _check_date = field_validator("operation_date")(_not_future)
 
 
 class TreatmentCreate(BaseModel):
     drug: DrugType
-    other_drug_name: Optional[str] = None
+    other_drug_name: Optional[str] = Field(None, max_length=200)
 
 
 class ResistantDrugCreate(BaseModel):
     drug: ResistantDrugType
-    other_drug_name: Optional[str] = None
+    other_drug_name: Optional[str] = Field(None, max_length=200)
 
 
 class ClinicalRecordCreate(BaseModel):
     strictures: Optional[bool] = None
     penetrations_fistulas: Optional[bool] = None
-    fecal_incontinence: Optional[str] = None
-    infectious_complications: Optional[str] = None
+    fecal_incontinence: Optional[str] = Field(None, max_length=10)
+    infectious_complications: Optional[str] = Field(None, max_length=5000)
     abdominal_surgeries: Optional[bool] = None
     steroid_dependence: Optional[bool] = None
     steroid_resistance: Optional[bool] = None
     advanced_therapy_resistance: Optional[bool] = None
     smoking_status: Optional[SmokingStatus] = None
-    side_effects: Optional[str] = None
-    resistant_drugs_other: Optional[str] = None
+    side_effects: Optional[str] = Field(None, max_length=5000)
+    resistant_drugs_other: Optional[str] = Field(None, max_length=5000)
     lab_results: List[LabResultCreate] = []
     surgeries: List[SurgeryCreate] = []
     treatments: List[TreatmentCreate] = []
@@ -337,14 +426,16 @@ class ClinicalRecordOut(BaseModel):
 class SelfAssessmentCreate(BaseModel):
     assessment_type: AssessmentType
     cd_abdominal_pain: Optional[int] = Field(None, ge=0, le=3)
-    cd_stool_count: Optional[int] = Field(None, ge=0)
+    cd_stool_count: Optional[int] = Field(None, ge=0, le=100)
     uc_rectal_bleeding: Optional[int] = Field(None, ge=0, le=3)
     uc_defecation_freq: Optional[int] = Field(None, ge=0, le=3)
     first_symptoms_date: Optional[date] = None
-    first_symptoms_desc: Optional[str] = None
-    possible_factors: Optional[str] = None
+    first_symptoms_desc: Optional[str] = Field(None, max_length=5000)
+    possible_factors: Optional[str] = Field(None, max_length=5000)
     constipation_on_flare: Optional[bool] = None
-    constipation_stool_freq: Optional[str] = None
+    constipation_stool_freq: Optional[str] = Field(None, max_length=5000)
+
+    _check_first_symptoms = field_validator("first_symptoms_date")(_not_future)
 
     @model_validator(mode="after")
     def check_fields_match_type(self) -> "SelfAssessmentCreate":
@@ -354,6 +445,14 @@ class SelfAssessmentCreate(BaseModel):
         elif self.assessment_type == AssessmentType.UC:
             if self.cd_abdominal_pain is not None or self.cd_stool_count is not None:
                 raise ValueError("CD fields must be None for UC assessment")
+
+        scores = (
+            [self.cd_abdominal_pain, self.cd_stool_count]
+            if self.assessment_type == AssessmentType.CD
+            else [self.uc_rectal_bleeding, self.uc_defecation_freq]
+        )
+        if all(sc is None for sc in scores):
+            raise ValueError("Вкажіть хоча б один показник самооцінки")
         return self
 
 
@@ -385,8 +484,8 @@ class ConsentUploadUrlResponse(BaseModel):
 
 
 class ConsentFileRegister(BaseModel):
-    s3_key: str
-    original_filename: Optional[str] = None
+    s3_key: str = Field(..., min_length=1, max_length=500)
+    original_filename: Optional[str] = Field(None, max_length=255)
 
 
 class ConsentFileOut(BaseModel):
@@ -404,8 +503,10 @@ class ConsentFileOut(BaseModel):
 
 class PatientLabResultCreate(BaseModel):
     lab_type: LabType
-    value: float = Field(ge=0)
+    value: float = Field(ge=0, le=99999999, allow_inf_nan=False)
     result_date: date
+
+    _check_date = field_validator("result_date")(_not_future)
 
 
 class PatientLabResultOut(BaseModel):

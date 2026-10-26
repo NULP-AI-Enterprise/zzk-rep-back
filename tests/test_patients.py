@@ -31,7 +31,7 @@ async def test_create_patient_by_doctor(client: AsyncClient, db: AsyncSession):
     )
     assert resp.status_code == 201
     data = resp.json()
-    assert data["initials"] == "Т.Т."
+    assert data["initials"] == "ТТ"
     assert data["diagnosis"] == "CD"
     assert data["status"] == "PENDING"
     assert data["surname"] == "Тестовий"

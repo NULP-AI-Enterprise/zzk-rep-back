@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user
+from app.core.deps import get_accessible_patient, get_current_user
 from app.db.session import get_db
 from app.models.models import (
     AssessmentType, PatientProfile, UserRole, PatientSelfAssessment, User,
@@ -24,30 +24,7 @@ def _calc_pro2(body: SelfAssessmentCreate) -> int | None:
 
 
 async def _get_patient_accessible(patient_id: int, current_user: User | PatientProfile, db: AsyncSession):
-    # 1. Якщо це ПАЦІЄНТ: він має доступ тільки до власного профілю
-    if isinstance(current_user, PatientProfile):
-        if current_user.id == patient_id:
-            return current_user  # Доступ дозволено
-        else:
-            raise HTTPException(status_code=403, detail="Доступ заборонено: ви можете бачити лише свій профіль")
-
-    # 2. Якщо це ЛІКАР: перевіряємо, чи цей пацієнт закріплений за ним
-    # (якщо ви хочете, щоб лікарі могли переглядати тільки своїх пацієнтів)
-    if isinstance(current_user, User):
-        result = await db.execute(
-            select(PatientProfile).where(PatientProfile.id == patient_id)
-        )
-        patient = result.scalar_one_or_none()
-
-        if not patient:
-            raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
-
-        # Перевірка, чи пацієнт закріплений за цим лікарем
-        if patient.doctor_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Цей пацієнт не закріплений за вами")
-        return patient
-
-    raise HTTPException(status_code=403, detail="Доступ заборонено")
+    return await get_accessible_patient(patient_id, current_user, db)
 
 
 # ── Єдиний універсальний ендпоінт для створення ──────────────────────────────
@@ -58,6 +35,8 @@ async def create_self_assessment(
         current_user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
 ):
+    if not isinstance(current_user, PatientProfile) and current_user.role == UserRole.MODERATOR:
+        raise HTTPException(status_code=403, detail="Модератор не може створювати самооцінки")
     await _get_patient_accessible(patient_id, current_user, db)
 
     is_patient = current_user.role == UserRole.PATIENT

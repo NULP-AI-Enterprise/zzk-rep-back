@@ -77,7 +77,7 @@ async def test_verify_expired_token(client: AsyncClient, db: AsyncSession):
 
     resp = await client.post("/api/v1/auth/verify", json={"token": token_value})
     assert resp.status_code == 400
-    assert "протермінований" in resp.json()["detail"]
+    assert "минув" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio

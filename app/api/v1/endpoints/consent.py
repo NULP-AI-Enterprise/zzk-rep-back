@@ -1,10 +1,11 @@
+import re
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.deps import get_current_user, require_doctor_or_admin
+from app.core.deps import get_accessible_patient, get_current_user, require_doctor_or_admin
 from app.db.session import get_db
 from app.models.models import ConsentFile, PatientProfile, User, UserRole
 from app.schemas.schemas import (
@@ -24,14 +25,8 @@ def _s3_client():
     )
 
 
-async def _get_patient_or_403(patient_id: int, current_user: User, db: AsyncSession) -> PatientProfile:
-    result = await db.execute(select(PatientProfile).where(PatientProfile.id == patient_id))
-    patient = result.scalar_one_or_none()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
-    if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Доступ заборонено")
-    return patient
+async def _get_patient_or_403(patient_id: int, current_user: User | PatientProfile, db: AsyncSession) -> PatientProfile:
+    return await get_accessible_patient(patient_id, current_user, db)
 
 
 @router.post("/upload-url", response_model=ConsentUploadUrlResponse)
@@ -61,6 +56,9 @@ async def register_consent_file(
     db: AsyncSession = Depends(get_db),
 ):
     await _get_patient_or_403(patient_id, current_user, db)
+
+    if not re.fullmatch(rf"consent/{patient_id}/[0-9a-f-]{{36}}\.pdf", body.s3_key):
+        raise HTTPException(status_code=422, detail="Некоректний ключ файлу")
 
     record = ConsentFile(
         patient_id=patient_id,

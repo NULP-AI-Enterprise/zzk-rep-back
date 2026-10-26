@@ -87,3 +87,44 @@ require_admin = require_roles(UserRole.ADMIN)
 require_doctor_or_admin = require_roles(UserRole.DOCTOR, UserRole.ADMIN)
 require_moderator_or_admin = require_roles(UserRole.MODERATOR, UserRole.ADMIN)
 require_any = require_roles(UserRole.DOCTOR, UserRole.PATIENT, UserRole.MODERATOR, UserRole.ADMIN)
+
+
+async def get_accessible_patient(
+        patient_id: int,
+        current_user: User | PatientProfile,
+        db: AsyncSession,
+) -> PatientProfile:
+    """Load a patient and enforce who may see their data.
+
+    PATIENT   — only themselves
+    DOCTOR    — only patients attached to them
+    MODERATOR — only patients of their region (patient's region or their doctor's region)
+    ADMIN     — everyone
+    """
+    result = await db.execute(select(PatientProfile).where(PatientProfile.id == patient_id))
+    patient = result.scalar_one_or_none()
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
+
+    if isinstance(current_user, PatientProfile):
+        if patient.id != current_user.id:
+            raise HTTPException(status_code=403, detail="Доступ заборонено")
+        return patient
+
+    if current_user.role == UserRole.ADMIN:
+        return patient
+
+    if current_user.role == UserRole.DOCTOR:
+        if patient.doctor_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Доступ заборонено")
+        return patient
+
+    if current_user.role == UserRole.MODERATOR and current_user.region_id is not None:
+        if patient.region_id == current_user.region_id:
+            return patient
+        if patient.doctor_id is not None:
+            doc = await db.execute(select(User.region_id).where(User.id == patient.doctor_id))
+            if doc.scalar_one_or_none() == current_user.region_id:
+                return patient
+
+    raise HTTPException(status_code=403, detail="Доступ заборонено")

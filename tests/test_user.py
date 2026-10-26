@@ -151,4 +151,4 @@ async def test_create_duplicate_email(client: AsyncClient, db: AsyncSession):
         json={"email": "dup_email@test.com", "role": "DOCTOR", "first_name": "A", "last_name": "B"},
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 409

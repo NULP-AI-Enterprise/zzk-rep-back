@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.db.session import AsyncSessionLocal # Або ваш спосіб отримання сесії
+from app.core.config import settings
+from app.db.session import AsyncSessionLocal
 from app.db.init_db import init_db
 
 from app.api.v1.endpoints import (auth, consent, patients, records, regions, self_assessment, user)
@@ -14,7 +15,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # в продакшені вказати конкретні origins
+    allow_origins=[settings.FRONTEND_URL.rstrip("/")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

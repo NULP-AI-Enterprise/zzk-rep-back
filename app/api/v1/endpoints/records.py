@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.deps import get_current_user, require_doctor_or_admin
+from app.core.deps import get_accessible_patient, get_current_user, require_doctor_or_admin
 from app.db.session import get_db
 from app.models.models import (
     CdComplication, ClinicalLabResult, ClinicalResistantDrug,
@@ -20,16 +20,8 @@ from app.schemas.schemas import (
 router = APIRouter(prefix="/patients/{patient_id}/records", tags=["Records"])
 
 
-async def _get_patient_or_403(patient_id: int, current_user: User, db: AsyncSession) -> PatientProfile:
-    result = await db.execute(select(PatientProfile).where(PatientProfile.id == patient_id))
-    patient = result.scalar_one_or_none()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
-    if current_user.role == UserRole.DOCTOR and patient.doctor_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Доступ заборонено")
-    if isinstance(current_user, PatientProfile) and patient.id != current_user.id:
-        raise HTTPException(status_code=403, detail="Доступ заборонено")
-    return patient
+async def _get_patient_or_403(patient_id: int, current_user: User | PatientProfile, db: AsyncSession) -> PatientProfile:
+    return await get_accessible_patient(patient_id, current_user, db)
 
 
 def _calc_harvey_bradshaw(body: CdRecordCreate) -> int | None:

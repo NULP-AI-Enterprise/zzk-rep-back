@@ -63,4 +63,8 @@ async def create_user(db: AsyncSession, email: str, role: UserRole, **kwargs) ->
 
 def get_token_for_user(user: User) -> str:
     """Генеруємо JWT напряму для тестів — без email round-trip."""
-    return create_access_token({"sub": str(user.id), "role": user.role.value})
+    return create_access_token({"sub": f"user:{user.id}", "role": user.role.value})
+
+
+def get_token_for_patient(patient) -> str:
+    return create_access_token({"sub": f"patient:{patient.id}", "role": "PATIENT"})
