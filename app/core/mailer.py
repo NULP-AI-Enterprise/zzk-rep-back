@@ -50,9 +50,11 @@ def send_action_mail(
     valid_for: str,
 ) -> bool:
     """Standard 'press the button' e-mail (plain + HTML) used for all one-time links."""
+    # the plain-text part has no button
+    plain_intro = intro.replace("натисніть кнопку нижче", "скористайтеся посиланням нижче")
     plain = (
-        f"Доброго дня!\n\n{intro}\n\n"
-        f"Перейдіть за посиланням:\n{link}\n\n"
+        f"Доброго дня!\n\n{plain_intro}\n\n"
+        f"{link}\n\n"
         f"Посилання дійсне {valid_for}."
     )
     html = f"""\
@@ -62,8 +64,8 @@ def send_action_mail(
 <body style="font-family:Arial,sans-serif;background:#f4f4f4;margin:0;padding:0;">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:40px 0;">
     <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0"
-             style="background:#ffffff;border-radius:12px;padding:40px;">
+      <table width="100%" cellpadding="0" cellspacing="0"
+             style="max-width:560px;background:#ffffff;border-radius:12px;padding:40px;">
         <tr><td style="padding-bottom:24px;">
           <h2 style="margin:0;color:#1a1a1a;font-size:22px;">ЗЗК Реєстр</h2>
         </td></tr>
