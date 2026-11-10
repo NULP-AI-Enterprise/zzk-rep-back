@@ -199,7 +199,7 @@ class PatientListItem(BaseModel):
 
 class PatientOut(PatientListItem):
     surname: Optional[str] = None
-    email: str
+    email: Optional[str] = None
     weight: Optional[float]
     height: Optional[int]
     histologically_confirmed: HistologyStatus
@@ -361,6 +361,18 @@ class ClinicalRecordCreate(BaseModel):
     surgeries: List[SurgeryCreate] = []
     treatments: List[TreatmentCreate] = []
     resistant_drugs: List[ResistantDrugCreate] = []
+
+    @model_validator(mode="after")
+    def _flags_match_lists(self):
+        if self.surgeries:
+            if self.abdominal_surgeries is False:
+                raise ValueError("Вказано операції, але «Операції в анамнезі» = Ні")
+            self.abdominal_surgeries = True
+        if self.resistant_drugs:
+            if self.advanced_therapy_resistance is False:
+                raise ValueError("Вказано препарати резистентності, але «Резистентність до біол. терапії» = Ні")
+            self.advanced_therapy_resistance = True
+        return self
 
 
 class LabResultOut(BaseModel):
