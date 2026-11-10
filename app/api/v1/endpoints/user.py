@@ -44,6 +44,8 @@ async def create_user(
     if exists.scalar_one_or_none() or patient_exists.first():
         raise HTTPException(status_code=409, detail="Email вже використовується")
 
+    if body.role == UserRole.MODERATOR and body.region_id is None:
+        raise HTTPException(status_code=422, detail="Для модератора потрібно вказати регіон")
     if body.region_id is not None:
         await _validate_region(body.region_id, db)
 
@@ -187,6 +189,9 @@ async def update_user(
 
     if "region_id" in data:
         await _validate_region(data["region_id"], db)
+    if (data.get("role", user.role) == UserRole.MODERATOR
+            and data.get("region_id", user.region_id) is None):
+        raise HTTPException(status_code=422, detail="Для модератора потрібно вказати регіон")
 
     for field, value in data.items():
         setattr(user, field, value)
