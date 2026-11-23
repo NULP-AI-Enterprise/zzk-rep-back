@@ -29,7 +29,9 @@ def send_mail(to: str, subject: str, plain: str, html: str | None = None) -> boo
     msg["Subject"] = subject
     msg["From"] = settings.SMTP_USER
     msg["To"] = to
-
+    if not settings.SMTP_HOST:
+        print(f"\n=== [DEV MAIL] to: {to} | {subject} ===\n{plain}\n=== END ===\n", flush=True)
+        return True
     try:
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
             server.starttls()

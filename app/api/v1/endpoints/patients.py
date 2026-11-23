@@ -9,7 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.v1.endpoints.auth import can_issue_login_token, send_login_link
-from app.core.deps import get_accessible_patient, get_current_user, require_any, require_doctor_or_admin
+from app.core.deps import (
+    get_accessible_patient, get_current_user, get_patient_for_management,
+    require_any, require_doctor_or_admin,
+)
 from app.core.mailer import build_link, send_action_mail
 from app.core.security import decrypt_surname, encrypt_surname
 from app.db.session import get_db
@@ -280,6 +283,8 @@ async def get_patient(
 
     out = PatientOut.model_validate(patient)
     out.surname = _serialize_surname(patient, current_user)
+    if isinstance(current_user, User) and current_user.role == UserRole.MODERATOR:
+        out.email = None
     return out
 
 
@@ -390,12 +395,10 @@ async def update_patient(
         raise HTTPException(status_code=409, detail="Конфлікт даних при оновленні")
 
     patient = await _fetch_patient(patient_id, db)
-    out = PatientOut.model_validate(patient)
-    out.surname = _serialize_surname(patient, current_user)
-    return out
+    return PatientListItem.model_validate(patient)
 
 
-@router.patch("/{patient_id}/status", response_model=PatientOut)
+@router.patch("/{patient_id}/status", response_model=PatientListItem)
 async def update_status(
     patient_id: int,
     body: PatientStatusUpdate,
@@ -451,8 +454,7 @@ async def update_status(
                 detail="Лікар може лише підтвердити (ATTACHED) або відкріпити (DETACHED) пацієнта",
             )
     elif is_moderator_or_admin:
-        if current_user.role == UserRole.MODERATOR:
-            await get_accessible_patient(patient_id, current_user, db)
+        await get_patient_for_management(patient_id, current_user, db)
         if body.status == PatientStatus.ATTACHED:
             if not body.doctor_id:
                 raise HTTPException(
@@ -517,7 +519,7 @@ async def add_patient_lab_result(
     current_user: User | PatientProfile = Depends(require_any),
     db: AsyncSession = Depends(get_db),
 ):
-    await get_accessible_patient(patient_id, current_user, db)
+    await get_accessible_patient(patient_id, current_user, db, write=True)
 
     if isinstance(current_user, PatientProfile):
         added_by_user_id = None
@@ -566,7 +568,7 @@ async def request_email_change(
     current_user: User | PatientProfile = Depends(require_doctor_or_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    patient = await get_accessible_patient(patient_id, current_user, db)
+    patient = await get_patient_for_management(patient_id, current_user, db)
 
     new_email = str(body.new_email).strip().lower()
     if await _email_taken(new_email, db, patient_id):

@@ -89,42 +89,63 @@ require_moderator_or_admin = require_roles(UserRole.MODERATOR, UserRole.ADMIN)
 require_any = require_roles(UserRole.DOCTOR, UserRole.PATIENT, UserRole.MODERATOR, UserRole.ADMIN)
 
 
-async def get_accessible_patient(
-        patient_id: int,
-        current_user: User | PatientProfile,
-        db: AsyncSession,
-) -> PatientProfile:
-    """Load a patient and enforce who may see their data.
-
-    PATIENT   — only themselves
-    DOCTOR    — only patients attached to them
-    MODERATOR — only patients of their region (patient's region or their doctor's region)
-    ADMIN     — everyone
-    """
+async def _load_patient(patient_id: int, db: AsyncSession) -> PatientProfile:
     result = await db.execute(select(PatientProfile).where(PatientProfile.id == patient_id))
     patient = result.scalar_one_or_none()
     if patient is None:
         raise HTTPException(status_code=404, detail="Пацієнта не знайдено")
+    return patient
+
+
+async def _in_moderator_region(patient: PatientProfile, user: User, db: AsyncSession) -> bool:
+    rid = user.region_id
+    if rid is None:
+        return False
+    if patient.region_id == rid:
+        return True
+    if patient.doctor_id is not None:
+        doc = await db.execute(select(User.region_id).where(User.id == patient.doctor_id))
+        return doc.scalar_one_or_none() == rid
+    return False
+
+
+async def get_accessible_patient(
+        patient_id: int,
+        current_user: User | PatientProfile,
+        db: AsyncSession,
+        write: bool = False,
+) -> PatientProfile:
+    """Доступ до медичних даних.
+    PATIENT   — лише свої
+    DOCTOR    — лише своїх пацієнтів
+    ADMIN     — усі (власник)
+    MODERATOR — знеособлені дані пацієнтів СВОГО регіону, лише читання (write=True -> 403)
+    """
+    patient = await _load_patient(patient_id, db)
 
     if isinstance(current_user, PatientProfile):
-        if patient.id != current_user.id:
-            raise HTTPException(status_code=403, detail="Доступ заборонено")
-        return patient
-
-    if current_user.role == UserRole.ADMIN:
-        return patient
-
-    if current_user.role == UserRole.DOCTOR:
-        if patient.doctor_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Доступ заборонено")
-        return patient
-
-    if current_user.role == UserRole.MODERATOR and current_user.region_id is not None:
-        if patient.region_id == current_user.region_id:
+        if patient.id == current_user.id:
             return patient
-        if patient.doctor_id is not None:
-            doc = await db.execute(select(User.region_id).where(User.id == patient.doctor_id))
-            if doc.scalar_one_or_none() == current_user.region_id:
-                return patient
+    elif current_user.role == UserRole.ADMIN:
+        return patient
+    elif current_user.role == UserRole.DOCTOR:
+        if patient.doctor_id == current_user.id:
+            return patient
+    elif current_user.role == UserRole.MODERATOR and not write:
+        if await _in_moderator_region(patient, current_user, db):
+            return patient
 
     raise HTTPException(status_code=403, detail="Доступ заборонено")
+
+
+async def get_patient_for_management(
+        patient_id: int,
+        current_user: User | PatientProfile,
+        db: AsyncSession,
+) -> PatientProfile:
+    if isinstance(current_user, User) and current_user.role in (UserRole.ADMIN, UserRole.MODERATOR):
+        patient = await _load_patient(patient_id, db)
+        if current_user.role == UserRole.ADMIN or await _in_moderator_region(patient, current_user, db):
+            return patient
+        raise HTTPException(status_code=403, detail="Доступ заборонено")
+    return await get_accessible_patient(patient_id, current_user, db)

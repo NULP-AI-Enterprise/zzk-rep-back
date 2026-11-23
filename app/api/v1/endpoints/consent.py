@@ -26,7 +26,7 @@ def _s3_client():
 
 
 async def _get_patient_or_403(patient_id: int, current_user: User | PatientProfile, db: AsyncSession) -> PatientProfile:
-    return await get_accessible_patient(patient_id, current_user, db)
+    return await get_accessible_patient(patient_id, current_user, db, write=True)
 
 
 @router.post("/upload-url", response_model=ConsentUploadUrlResponse)
